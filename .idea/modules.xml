@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/SpraMatGenerator.iml" filepath="$PROJECT_DIR$/.idea/SpraMatGenerator.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/sprachlernTool.iml" filepath="$PROJECT_DIR$/.idea/sprachlernTool.iml" />
     </modules>
   </component>
 </project>
