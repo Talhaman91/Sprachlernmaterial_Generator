@@ -109,11 +109,11 @@ def build_user_prompt(p: Params) -> str:
         lines += ["", "Parameter (bitte so gut wie möglich einhalten):"]
 
         if a.max_sentences > 0:
-            lines.append(f"- Anzahl Sätze: höchstens {a.max_sentences}.")
+            lines.append(f"- Anzahl Sätze: höchstens {a.max_sentences} (weniger ist ok).")
         if a.max_words_per_sentence > 0:
-            lines.append(f"- Wörter pro Satz: höchstens {a.max_words_per_sentence}.")
+            lines.append(f"- Wörter pro Satz: höchstens {a.max_words_per_sentence} (weniger ist ok).")
         if a.max_syllables_per_token > 0:
-            lines.append(f"- Silben pro Token: höchstens {a.max_syllables_per_token}.")
+            lines.append(f"- Silben pro Token: höchstens {a.max_syllables_per_token} (weniger ist ok).")
         if a.max_dep_clauses_per_sentence > 0.0:
             lines.append(f"- Dependenznebensätze pro Satz: höchstens {a.max_dep_clauses_per_sentence}.")
         lines.append(f"- Verbotene Tempora: {forbidden}. Versuche alle erlaubten Tempora zu verwenden sofern es Sinn ergibt.")
@@ -148,9 +148,9 @@ def build_user_prompt(p: Params) -> str:
         f"Textart: {g.text_type}.",
         "",
         "Parameter (so gut wie möglich einhalten):",
-        f"- Anzahl Sätze: höchstens {a.max_sentences}.",
-        f"- Wörter pro Satz: höchstens {a.max_words_per_sentence}.",
-        f"- Silben pro Token: höchstens {a.max_syllables_per_token}.",
+        f"- Anzahl Sätze: höchstens {a.max_sentences} (weniger ist ok).",
+        f"- Wörter pro Satz: höchstens {a.max_words_per_sentence} (weniger ist ok).",
+        f"- Silben pro Token: höchstens {a.max_syllables_per_token} (weniger ist ok).",
         f"- Dependenznebensätze pro Satz: höchstens {a.max_dep_clauses_per_sentence}. Versuche bis zu {a.max_dep_clauses_per_sentence} einzubauen wenn möglich.",
         f"- Verbotene Tempora: {forbidden}. Versuche alle erlaubten Tempora zu verwenden sofern es Sinn ergibt.",
     ]

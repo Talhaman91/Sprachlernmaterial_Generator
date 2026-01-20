@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import Optional
+import re
 
 import pyphen
 
@@ -8,6 +9,8 @@ from src.sprachlern_tool.nlp.stanza_pipeline import get_stanza_nlp
 
 _DIC = pyphen.Pyphen(lang="de_DE")
 
+# UD-Relationen, die typisch für untergeordnete Sätze sind.
+# (Für "Nebensatz pro Satz" usw.)
 UD_SUBORD_REL_PREFIXES = (
     "advcl",      # adverbial clause
     "ccomp",      # clausal complement
@@ -15,6 +18,8 @@ UD_SUBORD_REL_PREFIXES = (
     "acl:relcl",  # relative clause
 )
 
+# Sehr einfache Liste häufiger Konnektoren.
+# Das ist bewusst pragmatisch und dient als grober Indikator, nicht als perfekte Linguistik.
 _CONNECTORS = {
     "und", "aber", "oder", "denn", "sondern", "doch", "jedoch",
     "weil", "da", "deshalb", "deswegen", "daher", "darum",
@@ -26,7 +31,7 @@ _CONNECTORS = {
 }
 
 # Heuristik-Marker für Nebensatzarten.
-# Wichtig: "Relativsatz" NICHT mehr über Artikel zählen, weil das extrem viele False Positives erzeugt.
+# Wichtig: "Relativsatz" NICHT über Artikel zählen, weil das extrem viele False Positives erzeugt.
 _SUBCLAUSE_MARKERS = {
     # Relativsatz wird UD-basiert gezählt (acl:relcl). Marker nur als Fallback (optional).
     "Relativsatz": {"welcher", "welche", "welches"},
@@ -95,7 +100,53 @@ def _head_id(word) -> int:
 
 
 def _token_is_word(word) -> bool:
-    return getattr(word, "upos", None) != "PUNCT"
+    """
+    Definition "Worttoken" für Zählungen:
+    - schließt reine Satzzeichen / Symbole aus
+    - zählt nur Tokens, die mindestens einen Buchstaben oder eine Ziffer enthalten
+    """
+    upos = getattr(word, "upos", None)
+    if upos in ("PUNCT", "SYM"):
+        return False
+    tok = (getattr(word, "text", "") or "").strip()
+    return bool(tok) and bool(re.search(r"[0-9A-Za-zÄÖÜäöüß]", tok))
+
+
+# Regex-basierte Wortzählung: stabiler für UI (inkl. Bindestrich-Wörter).
+_WORD_RE = re.compile(r"[0-9A-Za-zÄÖÜäöüß]+(?:-[0-9A-Za-zÄÖÜäöüß]+)*", re.UNICODE)
+
+
+def _count_words_regex(text: str) -> int:
+    return len(_WORD_RE.findall(text or ""))
+
+
+def _split_sentences_regex(text: str) -> list[str]:
+    """
+    Sehr einfache Satzsegmentierung für UI-Zählwerte.
+    Ziel: Satzanzahl soll "so zählen wie ein Mensch" (robust gegen LLM-Zeilenumbrüche etc.).
+    """
+    t = (text or "").strip()
+    if not t:
+        return []
+
+    # Abkürzungen entschärfen, damit z.B. "z.B." nicht als Satzende zählt.
+    abbr = ["z.B.", "u.a.", "d.h.", "bzw.", "etc."]
+    for a in abbr:
+        t = t.replace(a, a.replace(".", "§"))
+
+    chunks = re.split(r"\n+", t)
+    sents: list[str] = []
+    for c in chunks:
+        c = c.strip()
+        if not c:
+            continue
+        parts = re.split(r"(?<=[.!?])\s+", c)
+        for p in parts:
+            p = p.strip()
+            if p:
+                sents.append(p)
+
+    return [s.replace("§", ".") for s in sents]
 
 
 @dataclass
@@ -110,58 +161,87 @@ class TenseCounts:
 
 def _detect_tenses_for_sentence(words) -> tuple[TenseCounts, int, int]:
     """
-    Regelbasierte Erkennung von Tempus-Konstruktionen.
+    Regelbasierte Erkennung von Tempus-Konstruktionen (UD-basiert).
 
-    Rückgabe:
-    - Zählungen für Präsens/Präteritum/Perfekt/Plusquamperfekt/Futur I/Futur II
-    - Anzahl finiter Verben (für Ratio)
-    - Anzahl Perfekt-/Plusquamperfekt-Konstruktionen (für Ratio)
+    WICHTIGER FIX:
+    - "sein/haben/werden" sind nicht immer Hilfsverben.
+      Beispiel: "Die Landschaft war schön."
+      In UD ist "war" oft AUX mit deprel=cop (Kopula) -> das ist ein echtes Tempus-Signal
+      und darf NICHT pauschal rausgefiltert werden.
+
+    Grundidee:
+    1) Perfekt/Plusquamperfekt nur zählen, wenn:
+       - es ein Partizip gibt UND
+       - ein AUX (haben/sein) mit deprel=aux direkt an diesem Partizip hängt (head=Partizip)
+    2) Futur I/II über "werden" + Infinitiv / + Partizip + haben/sein-Infinitiv
+    3) Präsens/Präteritum über finite Verben (inkl. cop), aber:
+       - AUX, die wirklich als "aux" fürs Perfekt benutzt wurden, zählen wir nicht nochmal.
     """
     counts = TenseCounts()
-    finite_verbs = [w for w in words if _is_finite(w)]
-    finite_count = len(finite_verbs)
 
+    # Alle finiten Verbformen in diesem Satz (VERB oder AUX)
+    finite_verbs = [w for w in words if _is_finite(w)]
+    finite_count = 0  # wird weiter unten sauber gezählt (nach Ausschlüssen)
+
+    # Kleine Indexstruktur
     by_id = {w.id: w for w in words if getattr(w, "id", None) is not None}
+
+    # ------------------------------------------------------------
+    # 1) Perfekt / Plusquamperfekt sauber erkennen
+    # ------------------------------------------------------------
+    # Wir merken uns, welche AUX-Tokens wirklich als Perfekt-Aux genutzt wurden,
+    # damit sie später nicht nochmal als Präsens/Präteritum zählen.
+    aux_ids_used_for_perfekt: set[int] = set()
+    perfekt_constructions = 0
+
+    for w in words:
+        # Wir suchen Partizipien (meist der "Kern" im Perfekt)
+        if not _is_participle(w):
+            continue
+        part_id = getattr(w, "id", None)
+        if not part_id:
+            continue
+
+        # Suche AUX-Kinder, die per UD als aux am Partizip hängen
+        perf_aux = []
+        for a in words:
+            if getattr(a, "upos", None) != "AUX":
+                continue
+            if _dep_rel(a) != "aux":
+                continue
+            if _head_id(a) != part_id:
+                continue
+            if _lemma(a) in ("haben", "sein"):
+                perf_aux.append(a)
+
+        if not perf_aux:
+            continue
+
+        # Wenn wir hier sind, ist das sehr wahrscheinlich ein echtes Perfekt/Plusquamperfekt
+        perfekt_constructions += 1
+        for a in perf_aux:
+            aux_ids_used_for_perfekt.add(a.id)
+
+        # Past am AUX -> Plusquamperfekt, Pres -> Perfekt
+        # (Ist eine Heuristik, aber deutlich stabiler als "haben/sein irgendwo im Satz")
+        aux_tense = _ufeats_get(perf_aux[0], "Tense")  # Pres/Past
+        if aux_tense == "Past":
+            counts.plusquamperfekt += 1
+        else:
+            counts.perfekt += 1
+
+    # ------------------------------------------------------------
+    # 2) Futur I / Futur II erkennen
+    # ------------------------------------------------------------
+    # (Hier bleibt deine Logik erhalten, weil sie pragmatisch funktioniert.)
+    # Futur I: werden + Infinitiv
+    # Futur II: werden + Partizip + haben/sein-Infinitiv
     children = {w.id: [] for w in words if getattr(w, "id", None) is not None}
     for w in words:
         hid = _head_id(w)
         if hid in children and getattr(w, "id", None) is not None:
             children[hid].append(w.id)
 
-    perfekt_constructions = 0
-
-    # Perfekt/Plusquamperfekt: AUX (haben/sein) + Partizip in Subtree
-    for w in finite_verbs:
-        if getattr(w, "upos", None) != "AUX":
-            continue
-        if _lemma(w) not in ("haben", "sein"):
-            continue
-
-        tense = _ufeats_get(w, "Tense")  # Pres/Past
-        sid = w.id
-
-        stack = list(children.get(sid, []))
-        seen = set()
-        found_part = False
-        while stack:
-            nid = stack.pop()
-            if nid in seen:
-                continue
-            seen.add(nid)
-            ww = by_id.get(nid)
-            if ww and _is_participle(ww):
-                found_part = True
-                break
-            stack.extend(children.get(nid, []))
-
-        if found_part:
-            perfekt_constructions += 1
-            if tense == "Past":
-                counts.plusquamperfekt += 1
-            else:
-                counts.perfekt += 1
-
-    # Futur I/II: AUX werden + Infinitiv; Futur II zusätzlich Partizip + AUX-Infinitiv
     for w in finite_verbs:
         if getattr(w, "upos", None) != "AUX":
             continue
@@ -191,14 +271,33 @@ def _detect_tenses_for_sentence(words) -> tuple[TenseCounts, int, int]:
         elif has_inf:
             counts.futur1 += 1
 
-    # Präsens/Präteritum: finite Vollverben nach Tense-Feature, ohne zentrale Hilfsverben
+    # ------------------------------------------------------------
+    # 3) Präsens / Präteritum zählen
+    # ------------------------------------------------------------
+    # Hier ist der Kern-Fix: "sein/haben/werden" nur dann rausfiltern,
+    # wenn sie wirklich AUX mit deprel=aux sind (Hilfsverbfunktion).
+    #
+    # Kopula ("war", "ist") hat oft deprel=cop -> das zählt als Tempus!
     for w in finite_verbs:
         upos = getattr(w, "upos", None)
         lem = _lemma(w)
-        tense = _ufeats_get(w, "Tense")
+        rel = _dep_rel(w)
+        tense = _ufeats_get(w, "Tense")  # Pres / Past / None
 
-        if upos == "AUX" and lem in ("haben", "sein", "werden"):
+        wid = getattr(w, "id", None)
+        if wid is None:
             continue
+
+        # AUX, die fürs Perfekt benutzt wurden, zählen wir nicht noch als Präsens/Präteritum.
+        if wid in aux_ids_used_for_perfekt:
+            continue
+
+        # Hilfsverben wirklich nur dann skippen, wenn UD sie als "aux" markiert.
+        # Dadurch bleibt "war" (cop) drin und wird korrekt als Präteritum gezählt.
+        if upos == "AUX" and rel == "aux" and lem in ("haben", "sein", "werden"):
+            continue
+
+        finite_count += 1
 
         if tense == "Past":
             counts.praeteritum += 1
@@ -411,20 +510,38 @@ def _subclause_hits(doc) -> dict[str, int]:
 
 def analyze_text_stanza(text: str) -> dict:
     """
-    Analysiert den Text mit Stanza und berechnet alle Metriken, die im Report angezeigt werden.
+    Analysiert den Text mit Stanza.
+    Wort- und Satzanzahl werden regex-basiert ermittelt (UI-stabil),
+    alle linguistischen Metriken weiterhin mit Stanza.
     """
-    nlp = get_stanza_nlp()
-    doc = nlp(text or "")
+    text = text or ""
 
+    # ------------------------------------------------------------
+    # UI-stabile Zählwerte (sollen mit sichtbarem Text übereinstimmen)
+    # ------------------------------------------------------------
+    ui_sentences = _split_sentences_regex(text)
+    sent_count_ui = len(ui_sentences)
+    word_count_ui = _count_words_regex(text)
+
+    words_per_sentence_ui = [_count_words_regex(s) for s in ui_sentences]
+    max_wps = max(words_per_sentence_ui) if words_per_sentence_ui else 0
+    avg_wps = (
+        sum(words_per_sentence_ui) / len(words_per_sentence_ui)
+        if words_per_sentence_ui
+        else 0.0
+    )
+
+    # ------------------------------------------------------------
+    # Stanza-Analyse für syntaktische / linguistische Metriken
+    # ------------------------------------------------------------
+    nlp = get_stanza_nlp()
+    doc = nlp(text)
     sentences = doc.sentences
-    sent_count = len(sentences)
+    sent_count_stanza = len(sentences)
 
     tokens = _words_from_doc(doc)
-    word_count = len(tokens)
 
-    words_per_sentence = []
     max_syllables = 0
-
     lexcov = _lexical_coverage_wordfreq(doc)
 
     dep_subclause_heads_total = 0
@@ -438,7 +555,6 @@ def analyze_text_stanza(text: str) -> dict:
     for sent in sentences:
         words = sent.words
         word_tokens = [w for w in words if _token_is_word(w)]
-        words_per_sentence.append(len(word_tokens))
 
         for w in word_tokens:
             tok = getattr(w, "text", "") or ""
@@ -465,27 +581,41 @@ def analyze_text_stanza(text: str) -> dict:
         perfekt_constructions_total += perf_cnt
         konj_cnt += _count_konjunktiv(words)
 
-    max_wps = max(words_per_sentence) if words_per_sentence else 0
-    avg_wps = (sum(words_per_sentence) / len(words_per_sentence)) if words_per_sentence else 0.0
+    # ------------------------------------------------------------
+    # Aggregierte Kennzahlen
+    # ------------------------------------------------------------
+    dep_per_sentence = (
+        dep_subclause_heads_total / sent_count_stanza
+        if sent_count_stanza > 0
+        else 0.0
+    )
 
-    dep_per_sentence = (dep_subclause_heads_total / sent_count) if sent_count > 0 else 0.0
-    perf_ratio = (perfekt_constructions_total / finite_verbs_total) if finite_verbs_total > 0 else 0.0
+    perf_ratio = (
+        perfekt_constructions_total / finite_verbs_total
+        if finite_verbs_total > 0
+        else 0.0
+    )
 
     ttr_val = _ttr(tokens)
     mtld_val = _mtld(tokens)
     mtul_val = _mtul_from_sentences(doc)
     zipf_val = _zipf_avg(tokens)
 
-    connectors_per_100 = (connectors_count / word_count * 100.0) if word_count > 0 else 0.0
+    connectors_per_100 = (
+        connectors_count / word_count_ui * 100.0
+        if word_count_ui > 0
+        else 0.0
+    )
+
     coh = _coherence_score(doc)
     sub_hits = _subclause_hits(doc)
 
     return {
-        "word_count": word_count,
-
-        "sent_count": sent_count,
+        "word_count": word_count_ui,
+        "sent_count": sent_count_ui,
         "max_words_per_sentence": max_wps,
         "avg_words_per_sentence": avg_wps,
+
         "max_syllables_per_token": max_syllables,
         "dep_clauses_per_sentence": dep_per_sentence,
         "tense_counts": tense_counts_total,
