@@ -11,13 +11,16 @@ from src.sprachlern_tool.ui.sidebar import render_sidebar
 def main() -> None:
     st.set_page_config(page_title="Sprachlernmaterial Generator", layout="wide")
     st.title("Sprachlernmaterial Generator")
-    st.caption(
-        "Modus: Alpha 3–6 oder Ohne Alpha · Ohne Alpha: 0 = aus · Validierung· "
-        "Lexik-Abdeckung: Parameter bleibt, Prüfung später"
-    )
 
     ensure_defaults_exist()
     api_key, temperature = render_sidebar()
+
+    if "text_input" not in st.session_state:
+        st.session_state["text_input"] = ""
+
+    if "analysis_report" not in st.session_state:
+        st.session_state["analysis_report"] = ""
+
 
     params = build_params_from_state()
     system_prompt = build_system_prompt()
@@ -33,33 +36,47 @@ def main() -> None:
             st.code(user_prompt, language="text")
 
     with col2:
-        st.subheader("Generierter Text")
+        st.subheader("Text")
 
+        # Generierung: schreibt direkt ins Textfeld, das der Nutzer auch manuell bearbeiten kann
         if st.button("Generate", type="primary", use_container_width=True, help="Startet die Textgenerierung."):
             try:
                 out = gemini_generate(api_key, system_prompt, user_prompt, temperature)
-                st.session_state["last_text"] = out
+                st.session_state["text_input"] = out
+                st.session_state["analysis_report"] = ""  # optional: alten Report leeren
             except Exception as e:
                 st.error(str(e))
 
-        if "last_text" in st.session_state:
-            st.text_area("Output", st.session_state["last_text"], height=520, help="Ausgabe des LLMs.")
+        # Textfeld ist IMMER sichtbar und editierbar
+        st.text_area(
+            "Text (generiert oder manuell einfügen)",
+            key="text_input",
+            height=520,
+            help="Hier steht der generierte Text. Du kannst aber auch deinen eigenen Text einfügen.",
+        )
 
+        # Analyse-Button direkt unter dem Textfeld
+        if st.button("Analyze", use_container_width=True,
+                     help="Analysiert den Text mit den aktuell gewählten Parametern."):
             try:
-                report = build_validation_report(params, st.session_state["last_text"])
-                st.text_area(
-                    "Validierung / Metriken",
-                    report,
-                    height=420,
-                    help=(
-                        "Stanza-basierte Auswertung: Token/Sätze/Dep-Parsing + regelbasierte Tempus- und Ratio-Prüfung. "
-                        "Lexik-Abdeckung ist aktuell nicht geprüft."
-                    ),
-                )
+                current_text = (st.session_state.get("text_input") or "").strip()
+                if not current_text:
+                    st.warning("Bitte erst Text generieren oder einfügen.")
+                else:
+                    st.session_state["analysis_report"] = build_validation_report(params, current_text)
             except Exception as e:
                 st.error(str(e))
-        else:
-            st.info("Klick auf Generate.")
+
+        # Report-Feld ebenfalls immer sichtbar (auch wenn noch leer)
+        st.text_area(
+            "Validierung / Metriken",
+            st.session_state.get("analysis_report", ""),
+            height=420,
+            help=(
+                "Stanza-basierte Auswertung: Token/Sätze/Dep-Parsing + regelbasierte Tempus- und Ratio-Prüfung. "
+                "Lexik-Abdeckung ist aktuell nicht geprüft."
+            ),
+        )
 
 
 if __name__ == "__main__":
