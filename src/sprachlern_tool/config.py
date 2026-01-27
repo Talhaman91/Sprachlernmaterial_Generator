@@ -3,8 +3,8 @@ Zentrale Konfiguration und Konstanten.
 
 """
 
-GEMINI_MODEL = "gemini-3-flash-preview"
-#GEMINI_MODEL = "gemini-2.5-flash"
+#GEMINI_MODEL = "gemini-3-flash-preview"
+GEMINI_MODEL = "gemini-2.5-flash"
 
 TENSES_ALL = ["Präsens", "Präteritum", "Perfekt", "Plusquamperfekt", "Futur I", "Futur II"]
 TENSE_WEIGHT_LEVELS = ["keine Vorgabe", "verboten", "wenig", "mittel", "viel"]
@@ -32,8 +32,8 @@ MTUL_BANDS = {
 
 ZIPF_BANDS = {
     "niedrig": "sehr häufige Wörter (Zipf grob ≥ 5.5)",
-    "mittel": "alltagsnah (Zipf grob ≥ 5.0)",
-    "hoch": "differenzierter Wortschatz erlaubt (Zipf grob ≥ 4.5)",
+    "mittel": "alltagsnah (Zipf grob zwischen 4.5 und 5.5)",
+    "hoch": "differenzierter Wortschatz erlaubt (Zipf grob ≤ 4.5)",
     "sehr hoch": "keine Einschränkung",
 }
 

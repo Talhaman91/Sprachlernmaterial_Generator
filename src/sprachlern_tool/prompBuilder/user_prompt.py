@@ -38,7 +38,7 @@ def fine_params_to_prompt_lines(f: FineParams) -> list[str]:
         lines.append(f"- MTUL: {f.mtul_level}. Richtwert: {band}. (bestmöglich)")
 
     if f.forbidden_subclause_types:
-        lines.append(f"- Vermeide folgende Nebensatzarten: {', '.join(f.forbidden_subclause_types)}.")
+        lines.append(f"- Vermeide folgende Nebensatzarten: {', '.join(f.forbidden_subclause_types)}. Versuche die erlaubten Nebensatzarten einzubauen sofern es Sinn ergibt")
 
     if f.zipf_level != "keine Vorgabe":
         band = ZIPF_BANDS.get(f.zipf_level, f.zipf_level)
